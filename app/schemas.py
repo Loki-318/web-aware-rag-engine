@@ -35,3 +35,4 @@ class QueryResponse(BaseModel):
     answer: str
     sources: List[SourceDocument]
     question: str
+    provider: Optional[str] = None  # Which LLM provider was used

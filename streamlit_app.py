@@ -45,6 +45,103 @@ st.markdown("*Scalable Web-Aware Retrieval-Augmented Generation System*")
 with st.sidebar:
     st.header("⚙️ Settings")
     
+    # LLM Provider Selection
+    st.subheader("🤖 LLM Provider")
+    
+    # Initialize session state
+    if 'current_provider' not in st.session_state:
+        st.session_state.current_provider = 'ollama'
+    
+    llm_provider = st.selectbox(
+        "Choose Provider",
+        ["ollama", "openai", "gemini"],
+        index=["ollama", "openai", "gemini"].index(st.session_state.current_provider),
+        help="Select which LLM service to use for generating answers"
+    )
+    
+    # Provider-specific settings
+    provider_config = {}
+    api_key_valid = True
+    
+    if llm_provider == "openai":
+        st.info("💡 Using OpenAI for production-grade answers")
+        openai_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            value=st.session_state.get('openai_key', ''),
+            help="Get your key from platform.openai.com/api-keys"
+        )
+        openai_model = st.selectbox(
+            "Model",
+            ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo-preview"],
+            help="gpt-3.5-turbo is fastest and cheapest"
+        )
+        
+        if openai_key:
+            st.session_state.openai_key = openai_key
+            provider_config = {"api_key": openai_key, "model": openai_model}
+        else:
+            api_key_valid = False
+            st.warning("⚠️ Please enter your OpenAI API key")
+    
+    elif llm_provider == "gemini":
+        st.info("💡 Using Google Gemini with free tier")
+        gemini_key = st.text_input(
+            "Gemini API Key",
+            type="password",
+            value=st.session_state.get('gemini_key', ''),
+            help="Get your key from makersuite.google.com/app/apikey"
+        )
+        gemini_model = st.selectbox(
+            "Model",
+            ["gemini-pro"],
+            help="gemini-pro for text generation"
+        )
+        
+        if gemini_key:
+            st.session_state.gemini_key = gemini_key
+            provider_config = {"api_key": gemini_key, "model": gemini_model}
+        else:
+            api_key_valid = False
+            st.warning("⚠️ Please enter your Gemini API key")
+    
+    else:  # ollama
+        st.info("💡 Using Ollama (local, free, private)")
+        st.caption("Requires Ollama running locally")
+        api_key_valid = True  # No key needed for Ollama
+    
+    # Switch provider button
+    # Switch provider button
+    if st.button("🔄 Switch Provider", type="primary", use_container_width=True, disabled=not api_key_valid):
+        if llm_provider != st.session_state.current_provider:
+            with st.spinner(f"Switching to {llm_provider}..."):
+                try:
+                    response = requests.post(
+                        f"{API_URL}/provider/switch",
+                        json={"provider": llm_provider, "config": provider_config},
+                        timeout=10
+                    )
+                    
+                    if response.status_code == 200:
+                        st.session_state.current_provider = llm_provider
+                        st.success(f"✅ Switched to {llm_provider.upper()}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Failed to switch: {response.json().get('detail', 'Unknown error')}")
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
+    
+    # Show current provider
+    try:
+        provider_response = requests.get(f"{API_URL}/provider", timeout=5)
+        if provider_response.status_code == 200:
+            current = provider_response.json().get('provider', 'Unknown')
+            st.caption(f"🤖 Active: {current}")
+    except:
+        pass
+    
+    st.markdown("---")
+    
     # API Status Check
     try:
         response = requests.get(f"{API_URL}/", timeout=5)
@@ -212,11 +309,18 @@ with tab2:
         if not question.strip():
             st.error("⚠️ Please enter a question")
         else:
-            with st.spinner("🤖 Searching knowledge base and generating answer..."):
+            with st.spinner(f"🤖 Searching knowledge base..."):
                 try:
+                    # Prepare query payload
+                    query_payload = {
+                        "question": question,
+                        "top_k": top_k
+                    }
+                    
+                    # Make API request
                     response = requests.post(
                         f"{API_URL}/query",
-                        json={"question": question, "top_k": top_k},
+                        json=query_payload,
                         timeout=60
                     )
                     
@@ -226,6 +330,11 @@ with tab2:
                         # Answer
                         st.markdown("### 💡 Answer")
                         st.markdown(f"**Question:** *{data['question']}*")
+                        
+                        # Show which provider was used
+                        provider_used = data.get('provider', 'Unknown')
+                        st.caption(f"🤖 Generated by: **{provider_used}**")
+                        
                         st.markdown("---")
                         st.write(data['answer'])
                         

@@ -65,11 +65,74 @@ async def root():
     return {
         "status": "ok",
         "message": "RAG Engine API is running",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "current_provider": query_service.get_current_provider()
     }
 
+@app.get("/provider")
+async def get_provider():
+    """Get current LLM provider"""
+    return {
+        "provider": query_service.get_current_provider()
+    }
+
+@app.post("/provider/switch")
+async def switch_provider(request: Request):
+    """
+    Dynamically switch LLM provider
+    """
+    try:
+        body = await request.json()
+        provider = body.get("provider", "").lower()
+        config = body.get("config", {})
+        
+        if provider == "ollama":
+            query_service.set_provider(
+                provider_name="ollama",
+                ollama_base_url=settings.OLLAMA_BASE_URL,
+                ollama_model=settings.OLLAMA_MODEL
+            )
+        elif provider == "openai":
+            api_key = config.get("api_key")
+            if not api_key:
+                raise HTTPException(status_code=400, detail="OpenAI API key required")
+            
+            query_service.set_provider(
+                provider_name="openai",
+                openai_api_key=api_key,
+                openai_model=config.get("model", settings.OPENAI_MODEL)
+            )
+        elif provider == "gemini":
+            api_key = config.get("api_key")
+            if not api_key:
+                raise HTTPException(status_code=400, detail="Gemini API key required")
+            
+            query_service.set_provider(
+                provider_name="gemini",
+                gemini_api_key=api_key,
+                gemini_model=config.get("model", settings.GEMINI_MODEL)
+            )
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+        
+        # Force re-check
+        current = query_service.get_current_provider()
+        
+        return {
+            "status": "success",
+            "provider": current,
+            "message": f"Switched to {provider}"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error switching provider: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/ingest-url", response_model=IngestURLResponse, status_code=202)
-async def ingest_url(request: IngestURLRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+async def ingest_url(request: Request, url_request: IngestURLRequest, db: Session = Depends(get_db)):
     """
     Submit a URL for asynchronous ingestion
     
@@ -77,8 +140,17 @@ async def ingest_url(request: IngestURLRequest, db: Session = Depends(get_db)):
     - Creates a database record
     - Queues a background job for processing
     - Returns immediately with job ID
+    
+    Rate limit: 10 requests per minute
     """
-    url = str(request.url)
+    url = str(url_request.url)
+    
+    # Validate URL scheme
+    if not url.startswith(('http://', 'https://')):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid URL scheme. Only http:// and https:// are supported."
+        )
     
     # Check if URL already exists
     existing = db.query(Document).filter(Document.url == url).first()
@@ -97,23 +169,54 @@ async def ingest_url(request: IngestURLRequest, db: Session = Depends(get_db)):
                 status=existing.status,
                 message="URL is currently being processed"
             )
+        elif existing.status == "failed":
+            # Retry failed URLs
+            existing.status = "pending"
+            existing.error_message = None
+            db.commit()
+            
+            from app.worker import process_url_job
+            job = job_queue.enqueue(
+                process_url_job,
+                doc_id=existing.id,
+                url=url,
+                job_timeout='10m'
+            )
+            
+            return IngestURLResponse(
+                job_id=existing.id,
+                url=url,
+                status="pending",
+                message="Retrying failed URL"
+            )
     
     # Create new document record
-    document = Document(url=url, status="pending")
-    db.add(document)
-    db.commit()
-    db.refresh(document)
+    try:
+        document = Document(url=url, status="pending")
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+    except Exception as e:
+        logger.error(f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create document record")
     
     # Queue background job
-    from app.worker import process_url_job
-    job = job_queue.enqueue(
-        process_url_job,
-        doc_id=document.id,
-        url=url,
-        job_timeout='10m'
-    )
-    
-    logger.info(f"Queued job {job.id} for URL: {url}")
+    try:
+        from app.worker import process_url_job
+        job = job_queue.enqueue(
+            process_url_job,
+            doc_id=document.id,
+            url=url,
+            job_timeout='10m'
+        )
+        
+        logger.info(f"Queued job {job.id} for URL: {url}")
+    except Exception as e:
+        logger.error(f"Failed to queue job: {str(e)}")
+        document.status = "failed"
+        document.error_message = f"Failed to queue job: {str(e)}"
+        db.commit()
+        raise HTTPException(status_code=500, detail="Failed to queue processing job")
     
     return IngestURLResponse(
         job_id=document.id,
@@ -158,26 +261,36 @@ async def list_documents(
     }
 
 @app.post("/query", response_model=QueryResponse)
-async def query_knowledge_base(request: QueryRequest):
+@limiter.limit("30/minute")
+async def query_knowledge_base(request: Request, query_request: QueryRequest):
     """
     Query the knowledge base using RAG
     
     - Searches vector store for relevant chunks
     - Generates grounded answer using Ollama
     - Returns answer with source citations
+    
+    Rate limit: 30 requests per minute
     """
     try:
         result = query_service.query(
-            question=request.question,
-            top_k=request.top_k
+            question=query_request.question,
+            top_k=query_request.top_k
         )
         
         return QueryResponse(
-            question=request.question,
+            question=query_request.question,
             answer=result["answer"],
-            sources=result["sources"]
+            sources=result["sources"],
+            provider=result.get("provider", "Unknown")
         )
     
+    except ConnectionError as e:
+        logger.error(f"Ollama connection error: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail="LLM service unavailable. Please ensure Ollama is running."
+        )
     except Exception as e:
         logger.error(f"Error processing query: {str(e)}")
         raise HTTPException(

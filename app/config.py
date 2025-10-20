@@ -15,9 +15,24 @@ class Settings(BaseSettings):
     QDRANT_PORT: int = 6333
     QDRANT_COLLECTION_NAME: str = "web_documents"
     
+    # LLM Provider Selection
+    LLM_PROVIDER: str = "ollama"  # Options: ollama, openai, gemini
+    
     # Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama2"
+    
+    # OpenAI
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-3.5-turbo"
+    OPENAI_TEMPERATURE: float = 0.7
+    OPENAI_MAX_TOKENS: int = 500
+    
+    # Google Gemini
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-pro"
+    GEMINI_TEMPERATURE: float = 0.7
+    GEMINI_MAX_TOKENS: int = 500
     
     # Embedding
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
